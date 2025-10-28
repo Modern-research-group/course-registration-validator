@@ -50,205 +50,199 @@ class PDFExtractor:
             return ""
     
     def extract_student_info(self, text):
-            """
-            Extract student information from the extracted text.
+        """
+        Extract student information from the extracted text.
+        
+        Args:
+            text: Extracted text from PDF
             
-            Args:
-                text: Extracted text from PDF
-                
-            Returns:
-                Dictionary containing student information
-            """
-            # Extract student ID
-            student_id = "Unknown"
-            id_match = re.search(r'Student No\s*(\d+)', text)
-            if id_match:
-                student_id = id_match.group(1).strip()
-            
-            # Extract name - stop at "Field of Study" 
-            student_name = "Unknown"
-            name_match = re.search(r'Name\s+(.*?)(?=Field of Study|Date of Admission|\n|$)', text)
-            if name_match:
-                student_name = name_match.group(1).strip()
-            
-            # Extract field of study
-            field_of_study = "Unknown"
-            field_match = re.search(r'Field of Study\s+(.*?)(?=Date of Admission|\n|$)', text)
-            if field_match:
-                field_of_study = field_match.group(1).strip()
-            
-            # Extract date of admission
-            date_admission = "Unknown"
-            date_match = re.search(r'Date of Admission\s+(.*?)(?:\n|$)', text)
-            if date_match:
-                date_admission = date_match.group(1).strip()
-            
-            return {
-                "id": student_id,
-                "name": student_name,
-                "field_of_study": field_of_study,
-                "date_admission": date_admission
-            }
+        Returns:
+            Dictionary containing student information
+        """
+        # Extract student ID - collect exactly 10 digits, ignoring spaces
+        student_id = "Unknown"
+        id_match = re.search(r'Student No\s+([\d\s]+)', text)
+        if id_match:
+            # Extract only digits, ignore spaces
+            digits = ''.join(c for c in id_match.group(1) if c.isdigit())
+            # Take first 10 digits
+            if len(digits) >= 10:
+                student_id = digits[:10]
+            elif len(digits) > 0:
+                # If less than 10 digits found, use what we have
+                student_id = digits
+        
+        # Extract name - stop at "Field of Study" 
+        student_name = "Unknown"
+        name_match = re.search(r'Name\s+(.*?)(?=Field of Study|Date of Admission|\n|$)', text)
+        if name_match:
+            student_name = name_match.group(1).strip()
+        
+        # Extract field of study
+        field_of_study = "Unknown"
+        field_match = re.search(r'Field of Study\s+(.*?)(?=Date of Admission|\n|$)', text)
+        if field_match:
+            field_of_study = field_match.group(1).strip()
+        
+        # Extract date of admission
+        date_admission = "Unknown"
+        date_match = re.search(r'Date of Admission\s+(.*?)(?:\n|$)', text)
+        if date_match:
+            date_admission = date_match.group(1).strip()
+        
+        return {
+            "id": student_id,
+            "name": student_name,
+            "field_of_study": field_of_study,
+            "date_admission": date_admission
+        }
     
     def extract_semesters(self, text):
         """
-        Extract semester data from the extracted text (improved version).
+        ULTRA-ROBUST VERSION: Extract semester data with maximum flexibility.
+        Handles course codes that may be split with spaces during PDF extraction.
         """
-        # More flexible patterns
+        # Semester detection patterns
         semester_patterns = [
-            r'(First|Second)\s*Semester\s*(\d{4})',     # Handles missing spaces
-            r'Summer\s*Session\s*(\d{4})',              # Summer with flexible spacing
-            r'(First|Second|Summer)\s*(\d{4})'          # Alternative format
+            r'(First|Second)\s+Semester\s+(\d{4})',
+            r'Summer\s+Session\s+(\d{4})',
+            r'(First|Second)Semester(\d{4})',
+            r'SummerSession(\d{4})'
         ]
         
-        # Improved course pattern - more flexible with spacing
-        course_patterns = [
-            # Try original pattern first
-            r'(\d{8})\s+([\w\s&\'\-\+\.\,\/\(\)]+?)\s+([A-Z\+\-]+)\s+(\d+)',
-            # Pattern with flexible spacing
-            r'(\d{8})\s*([\w\s&\'\-\+\.\,\/\(\)]+?)\s*([A-Z\+\-]+)\s*(\d+)',
-            # Pattern for concatenated text
-            r'(\d{8})([A-Za-z][^0-9]*?)([A-Z\+\-]+)(\d+)'
-        ]
+        # KEY FIX: Course code pattern handles spaces in course codes
+        # Matches: 01208111 OR 012081 11 OR 0120 8111, etc.
+        # Followed by course name, grade, and credits
+        course_pattern = r'(\d{2,8}(?:\s*\d{1,6})?)\s+([A-Za-z][^\d\n]{5,100}?)\s+([A-Z][\+\-]?|W|N|F|P)\s+(\d+)'
         
-        gpa_pattern = r'sem\.\s*G\.P\.A\.\s*=\s*(\d+\.\d+).*?cum\.\s*G\.P\.A\.\s*=\s*(\d+\.\d+)'
-        
-        # Preprocessing - fix common spacing issues
-        text = re.sub(r'(First|Second)Semester', r'\1 Semester', text)
-        text = re.sub(r'SummerSession', r'Summer Session', text)
-        text = re.sub(r'(\d{8})([A-Za-z])', r'\1 \2', text)  # Add space after course code
-        
-        # Debug: Log first 500 chars of processed text
-        logger.debug(f"Processing text (first 500 chars): {text[:500]}")
+        gpa_pattern = r'sem\.\s*G\.P\s*\.A\.\s*=\s*(\d+\.\d+).*?cum\.\s*G\.P\s*\.A\.\s*=\s*(\d+\.\d+)'
         
         semesters = []
-        current_semester = None
         
         lines = text.split('\n')
-        logger.debug(f"Total lines to process: {len(lines)}")
         
+        # Find all semester headers with their line numbers
+        semester_markers = []
         for line_num, line in enumerate(lines):
-            line = line.strip()
-            
-            # Skip empty lines and URLs
-            if not line or "http" in line.lower() or ".php" in line.lower():
+            line_clean = line.strip()
+            if not line_clean:
                 continue
-            
-            # Try semester patterns
-            semester_found = False
-            for pattern_num, pattern in enumerate(semester_patterns):
-                semester_match = re.search(pattern, line, re.IGNORECASE)
-                if semester_match:
-                    logger.debug(f"Found semester on line {line_num}: {line}")
-                    
-                    if current_semester:
-                        semesters.append(current_semester)
-                    
-                    # Extract semester type and year
-                    groups = semester_match.groups()
-                    if len(groups) == 2:
-                        if "Summer" in semester_match.group(0):
-                            semester_type = "Summer"
-                            year = groups[1] if groups[1] else groups[0]
-                        else:
-                            semester_type = groups[0]
-                            year = groups[1]
-                    else:
-                        # Handle single group matches
-                        if "Summer" in line:
-                            semester_type = "Summer"
-                            year = groups[0]
-                        else:
-                            # Extract from the full match
-                            full_match = semester_match.group(0)
-                            year_match = re.search(r'\d{4}', full_match)
-                            year = year_match.group(0) if year_match else "Unknown"
-                            semester_type = "First" if "First" in full_match else ("Second" if "Second" in full_match else "Unknown")
-                    
-                    current_semester = {
-                        "semester": f"{semester_type} {year}",
-                        "semester_type": semester_type,
-                        "year": year,
-                        "year_int": int(year) if year.isdigit() else 0,
-                        "courses": [],
-                        "sem_gpa": None,
-                        "cum_gpa": None,
-                        "total_credits": 0,
-                        "semester_order": 0 if semester_type == "Summer" else (1 if semester_type == "First" else 2)
-                    }
-                    
-                    logger.debug(f"Created semester: {current_semester['semester']}")
-                    semester_found = True
-                    break
-            
-            if semester_found:
-                continue
-            
-            # Try GPA pattern
-            gpa_match = re.search(gpa_pattern, line, re.IGNORECASE)
-            if gpa_match and current_semester:
-                try:
-                    current_semester["sem_gpa"] = float(gpa_match.group(1))
-                    current_semester["cum_gpa"] = float(gpa_match.group(2))
-                    logger.debug(f"Found GPA: sem={gpa_match.group(1)}, cum={gpa_match.group(2)}")
-                except (ValueError, IndexError):
-                    pass
-                continue
-            
-            # Try course patterns
-            if current_semester:
-                course_found = False
-                for pattern_num, pattern in enumerate(course_patterns):
-                    course_match = re.search(pattern, line)
-                    if course_match:
-                        try:
-                            groups = course_match.groups()
-                            course_code = groups[0]
-                            course_name = groups[1].strip()
-                            grade = groups[2].strip() if len(groups) > 2 and groups[2] else ""
-                            credits_str = groups[3] if len(groups) > 3 else "0"
-                            
-                            # Clean up course name
-                            course_name = re.sub(r'\s+', ' ', course_name)
-                            
-                            # Parse credits
-                            credits = int(credits_str) if credits_str.isdigit() else 0
-                            
-                            course_data = {
-                                "code": course_code,
-                                "name": course_name,
-                                "grade": grade,
-                                "credits": credits
-                            }
-                            
-                            current_semester["courses"].append(course_data)
-                            
-                            # Count credits for non-withdrawn courses
-                            if grade not in ['W', 'N']:
-                                current_semester["total_credits"] += credits
-                            
-                            logger.debug(f"Found course: {course_code} - {course_name} - {grade} - {credits}")
-                            course_found = True
-                            break
-                            
-                        except Exception as e:
-                            logger.debug(f"Error parsing course from line '{line}': {e}")
-                            continue
                 
-                if not course_found:
-                    # Try to find course codes even if full pattern doesn't match
-                    code_match = re.search(r'(\d{8})', line)
-                    if code_match:
-                        logger.debug(f"Found course code but couldn't parse full line: {line}")
+            for pattern in semester_patterns:
+                match = re.search(pattern, line_clean, re.IGNORECASE)
+                if match:
+                    semester_markers.append((line_num, line_clean, match))
+                    break
         
-        # Add the last semester
-        if current_semester:
-            semesters.append(current_semester)
-            logger.debug(f"Added final semester: {current_semester['semester']}")
-        
-        logger.debug(f"Total semesters extracted: {len(semesters)}")
-        for sem in semesters:
-            logger.debug(f"Semester {sem['semester']}: {len(sem['courses'])} courses")
+        # Process each semester
+        for idx, (sem_line_num, sem_line, sem_match) in enumerate(semester_markers):
+            # Determine end boundary
+            end_line = semester_markers[idx + 1][0] if idx + 1 < len(semester_markers) else len(lines)
+            
+            # Parse semester info
+            groups = sem_match.groups()
+            if "Summer" in sem_line:
+                semester_type = "Summer"
+                year = groups[0] if len(groups) == 1 else groups[1]
+            else:
+                semester_type = groups[0]
+                year = groups[1] if len(groups) > 1 else groups[0]
+            
+            current_semester = {
+                "semester": f"{semester_type} Semester {year}" if semester_type != "Summer" else f"Summer Session {year}",
+                "semester_type": semester_type,
+                "year": year,
+                "year_int": int(year) if year.isdigit() else 0,
+                "courses": [],
+                "sem_gpa": None,
+                "cum_gpa": None,
+                "total_credits": 0,
+                "semester_order": 0 if semester_type == "Summer" else (1 if semester_type == "First" else 2)
+            }
+            
+            # Track seen course codes to avoid duplicates
+            seen_codes = set()
+            
+            # Process each line in the semester
+            for line_num in range(sem_line_num + 1, end_line):
+                line = lines[line_num].strip()
+                
+                if not line or "http" in line.lower() or ".php" in line.lower():
+                    continue
+                
+                # Check for GPA line
+                gpa_match = re.search(gpa_pattern, line, re.IGNORECASE)
+                if gpa_match:
+                    try:
+                        current_semester["sem_gpa"] = float(gpa_match.group(1))
+                        current_semester["cum_gpa"] = float(gpa_match.group(2))
+                    except (ValueError, IndexError):
+                        pass
+                    continue
+                
+                # Find all course matches in this line
+                course_matches = list(re.finditer(course_pattern, line))
+                
+                for course_match in course_matches:
+                    try:
+                        course_code_raw = course_match.group(1).strip()
+                        course_name = course_match.group(2).strip()
+                        grade = course_match.group(3).strip()
+                        credits_str = course_match.group(4).strip()
+                        
+                        # KEY FIX: Remove all spaces from course code
+                        course_code = course_code_raw.replace(' ', '')
+                        
+                        # Validate course code format (should be 8 digits after cleaning)
+                        if not course_code.isdigit() or len(course_code) != 8:
+                            continue
+                        
+                        # Skip if already seen
+                        if course_code in seen_codes:
+                            continue
+                        
+                        # Clean course name
+                        course_name = re.sub(r'\s+', ' ', course_name)
+                        # Remove common artifacts
+                        course_name = re.sub(r'Course Code.*$', '', course_name, flags=re.IGNORECASE)
+                        course_name = re.sub(r'Grade.*$', '', course_name, flags=re.IGNORECASE)
+                        course_name = re.sub(r'Credit.*$', '', course_name, flags=re.IGNORECASE)
+                        course_name = course_name.strip()
+                        
+                        # Skip if course name is too short (likely extraction error)
+                        if len(course_name) < 3:
+                            continue
+                        
+                        # Validate grade
+                        valid_grades = ['A', 'B+', 'B', 'C+', 'C', 'D+', 'D', 'F', 'W', 'N', 'P', 'I', 'S', 'U']
+                        if grade not in valid_grades:
+                            continue
+                        
+                        # Parse credits
+                        credits = int(credits_str) if credits_str.isdigit() else 0
+                        if credits <= 0 or credits > 6:  # Sanity check
+                            continue
+                        
+                        course_data = {
+                            "code": course_code,
+                            "name": course_name,
+                            "grade": grade,
+                            "credits": credits
+                        }
+                        
+                        current_semester["courses"].append(course_data)
+                        seen_codes.add(course_code)
+                        
+                        # Count credits
+                        if grade not in ['W', 'N', '']:
+                            current_semester["total_credits"] += credits
+                        
+                    except (IndexError, ValueError) as e:
+                        continue
+            
+            # Only add semester if it has courses
+            if current_semester["courses"]:
+                semesters.append(current_semester)
         
         return semesters
     
